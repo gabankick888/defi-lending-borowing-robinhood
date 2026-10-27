@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+interface IERC20 {
+    function balanceOf(address account)
+        external view returns (uint256);
+
+    function transfer(
+        address to,
+        uint256 amount
+    ) external returns (bool);
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
+
+contract RobinhoodLending {
+    IERC20 public immutable asset;
+
+    uint256 public constant COLLATERAL_FACTOR = 66;
+    uint256 public constant INTEREST_RATE = 5;
+    uint256 public constant YEAR = 365 days;
+
+    mapping(address => uint256) public deposits;
+    mapping(address => uint256) public collateral;
+    mapping(address => uint256) public borrowed;
+    mapping(address => uint256) public borrowTime;
+
+    uint256 public totalDeposits;
+    uint256 public totalCollateral;
+
+    event Deposit(
+        address indexed user,
+        uint256 amount
+    );
+
+    event Withdraw(
+        address indexed user,
+        uint256 amount
+    );
+
+    event CollateralAdded(
+        address indexed user,
+        uint256 amount
+    );
+
+    event Borrow(
+        address indexed user,
+        uint256 amount
+    );
+
+    event Repay(
+        address indexed user,
+        uint256 amount
+    );
+
+    event CollateralWithdrawn(
+        address indexed user,
+        uint256 amount
+    );
+
+    constructor(address tokenAddress) {
+        require(tokenAddress != address(0), "Invalid token");
+        asset = IERC20(tokenAddress);
+    }
+
+    function deposit(uint256 amount) external {
+        require(amount > 0, "Amount is zero");
+
+        require(
+            asset.transferFrom(
+                msg.sender,
+                address(this),
+                amount
+            ),
+            "Transfer failed"
+        );
+
+        deposits[msg.sender] += amount;
+        totalDeposits += amount;
+
+        emit Deposit(msg.sender, amount);
+    }
+
+    function withdraw(uint256 amount) external {
+        require(amount > 0, "Amount is zero");
+        require(
+            deposits[msg.sender] >= amount,
+            "Insufficient deposit"
+        );
+
+        uint256 available =
+            asset.balanceOf(address(this)) - totalCollateral;
+
+        require(
+            amount <= available,
+            "Insufficient liquidity"
+        );
+
+        deposits[msg.sender] -= amount;
+        totalDeposits -= amount;
+
+        require(
+            asset.transfer(msg.sender, amount),
+            "Transfer failed"
+        );
+
+        emit Withdraw(msg.sender, amount);
+    }
+
+    function addCollateral(uint256 amount) external {
+        require(amount > 0, "Amount is zero");
+
+        require(
+            asset.transferFrom(
+                msg.sender,
+                address(this),
+                amount
+            ),
+            "Transfer failed"
+        );
+
+        collateral[msg.sender] += amount;
+        totalCollateral += amount;
+
+        emit CollateralAdded(msg.sender, amount);
+    }
+
+    function borrow(uint256 amount) external {
+        require(amount > 0, "Amount is zero");
+        require(
+            borrowed[msg.sender] == 0,
+            "Existing loan must be repaid first"
+        );
+
+        uint256 maxBorrow =
+            collateral[msg.sender] * COLLATERAL_FACTOR / 100;
+
+        require(
+            amount <= maxBorrow,
+            "Exceeds collateral limit"
+        );
+
+        uint256 available =
+            asset.balanceOf(address(this)) - totalCollateral;
+
+        require(
+            amount <= available,
+            "Insufficient liquidity"
+        );
+
+        borrowed[msg.sender] = amount;
+        borrowTime[msg.sender] = block.timestamp;
+
+        require(
+            asset.transfer(msg.sender, amount),
+            "Transfer failed"
+        );
+
+        emit Borrow(msg.sender, amount);
+    }
+
+    function getDebt(address user)
+        public
+        view
+        returns (uint256)
+    {
+        uint256 principal = borrowed[user];
+
+        if (principal == 0) {
+            return 0;
+        }
+
+        uint256 elapsed =
+            block.timestamp - borrowTime[user];
+
+        uint256 interest =
+            principal * INTEREST_RATE * elapsed
+            / (100 * YEAR);
+
+        return principal + interest;
+    }
+
+    function repay() external {
+        uint256 debt = getDebt(msg.sender);
+
+        require(debt > 0, "No outstanding debt");
+
+        borrowed[msg.sender] = 0;
+        borrowTime[msg.sender] = 0;
+
+        require(
+            asset.transferFrom(
+                msg.sender,
+                address(this),
+                debt
+            ),
+            "Repayment failed"
+        );
+
+        emit Repay(msg.sender, debt);
+    }
+
+    function withdrawCollateral() external {
+        require(
+            borrowed[msg.sender] == 0,
+            "Repay loan first"
+        );
+
+        uint256 amount = collateral[msg.sender];
+
+        require(amount > 0, "No collateral");
+
+        collateral[msg.sender] = 0;
+        totalCollateral -= amount;
+
+        require(
+            asset.transfer(msg.sender, amount),
+            "Transfer failed"
+        );
+
+        emit CollateralWithdrawn(msg.sender, amount);
+    }
+
+    function availableLiquidity()
+        external
+        view
+        returns (uint256)
+    {
+        return
+            asset.balanceOf(address(this))
+            - totalCollateral;
+    }
+}
